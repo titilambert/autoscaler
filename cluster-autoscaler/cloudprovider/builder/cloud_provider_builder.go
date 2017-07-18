@@ -17,12 +17,14 @@ limitations under the License.
 package builder
 
 import (
+	"os"
+
 	"github.com/golang/glog"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/aws"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/azure"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/external"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/gce"
-	"os"
 )
 
 // CloudProviderBuilder builds a cloud provider from all the necessary parameters including the name of a cloud provider e.g. aws, gce
@@ -113,6 +115,13 @@ func (b CloudProviderBuilder) Build(discoveryOpts cloudprovider.NodeGroupDiscove
 		cloudProvider, err = azure.BuildAzureCloudProvider(azureManager, nodeGroupsFlag)
 		if err != nil {
 			glog.Fatalf("Failed to create Azure cloud provider: %v", err)
+		}
+	}
+
+	if b.cloudProviderFlag == "external" {
+		cloudProvider, err = external.BuildExternalCloudProvider(nodeGroupsFlag)
+		if err != nil {
+			glog.Fatalf("Failed to create External cloud provider: %v", err)
 		}
 	}
 
