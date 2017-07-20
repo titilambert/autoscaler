@@ -17,6 +17,7 @@ import (
 
 type ExternalCloudProvider struct {
 	ExtGroup []*nodeGroup
+	url      string
 }
 
 type nodeGroup struct {
@@ -25,6 +26,7 @@ type nodeGroup struct {
 	id      string
 	nodes   []string
 	lock    sync.RWMutex
+	url     string
 }
 
 func (eg *nodeGroup) MinSize() int {
@@ -45,14 +47,17 @@ func (eg *nodeGroup) TargetSize() (int, error) {
 
 // How many "currently building" VMs needs to be removed
 func (eg *nodeGroup) DecreaseTargetSize(delta int) error {
-	// todo
-	return nil
+	return fmt.Errorf("external: DecreaseTargetSize not implemented")
 }
 
 func (eg *nodeGroup) IncreaseSize(delta int) error {
-	_, err := http.Get(fmt.Sprintf("http://127.0.0.1:8080/addNodes?size=%d", delta))
+	resp, err := http.Get(fmt.Sprintf("%s/addNodes?size=%d", eg.url, delta))
+
 	if err != nil {
 		return err
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("Status code != 200!")
 	}
 	return nil
 }
@@ -62,7 +67,7 @@ func (eg *nodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 
 	for _, node := range nodes {
 		go func(node *apiv1.Node, msg chan error) {
-			_, err := http.Get(fmt.Sprintf("http://127.0.0.1:8080/removeNode?name=%v", node.Name))
+			_, err := http.Get(fmt.Sprintf("%s/removeNode?name=%v", eg.url, node.Spec.ProviderID))
 			if err != nil {
 				msg <- err
 				return
@@ -98,7 +103,7 @@ func (eg *nodeGroup) Nodes() ([]string, error) {
 }
 
 func (ext *ExternalCloudProvider) fetchCloudNodes() {
-	resp, err := http.Get("http://127.0.0.1:8080/nodeGroups")
+	resp, err := http.Get(fmt.Sprintf("%s/nodeGroups", ext.url))
 	if err != nil {
 		glog.Warningf("[external] failed to fetch nodes: %v", err)
 		return
@@ -111,15 +116,10 @@ func (ext *ExternalCloudProvider) fetchCloudNodes() {
 		return
 	}
 
-	for name, nodes := range res {
-		for _, group := range ext.ExtGroup {
-			// Only playing with groups that are defined by --nodes:x:y:groupName
-			if group.id == name {
-				group.lock.Lock()
-				group.nodes = nodes
-				group.lock.Unlock()
-			}
-		}
+	for _, group := range ext.ExtGroup {
+		group.lock.Lock()
+		group.nodes = res[group.id] // default to []string{} if not found
+		group.lock.Unlock()
 	}
 }
 
@@ -130,8 +130,11 @@ func loopForever(interval time.Duration, f func()) {
 	}
 }
 
-func BuildExternalCloudProvider(specs []string) (*ExternalCloudProvider, error) {
-	ext := &ExternalCloudProvider{}
+func BuildExternalCloudProvider(specs []string, url string) (*ExternalCloudProvider, error) {
+	ext := &ExternalCloudProvider{
+		url: url,
+	}
+
 	for _, spec := range specs {
 		groupSpec, err := dynamic.SpecFromString(spec)
 		if err != nil {
@@ -141,6 +144,7 @@ func BuildExternalCloudProvider(specs []string) (*ExternalCloudProvider, error) 
 			minSize: groupSpec.MinSize,
 			maxSize: groupSpec.MaxSize,
 			id:      groupSpec.Name,
+			url:     url,
 		})
 	}
 
