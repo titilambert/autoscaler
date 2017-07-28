@@ -1,5 +1,17 @@
 package external
 
+// TODO: Add template for config file?
+// Example: --cloud-config=foo.cfg // or what ever, nothing is currently implemented.
+// [external]
+// add = http://127.0.0.1/api/v1/scaleUp/{size}
+// remove = http://127.0.0.1/api/v1/scaleDown/{name}
+// nodes = http://127.0.0.1/api/v1/nodes
+// TODO: Comments
+// TODO: Better struct name? And definitively better method names (i.e. not `eg *nodeGroup')
+// TODO: Better check for http response
+// TODO: Do not copy url
+// TODO: Add support for cluster-autoscaler 0.6
+
 import (
 	"encoding/json"
 	"fmt"
