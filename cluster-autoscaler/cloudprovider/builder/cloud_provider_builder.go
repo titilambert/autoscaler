@@ -120,9 +120,13 @@ func (b CloudProviderBuilder) Build(discoveryOpts cloudprovider.NodeGroupDiscove
 
 	if b.cloudProviderFlag == "external" {
 		if b.cloudConfig == "" {
-			glog.Fatalf("Failed to fetch external service. Missing --cloud-config=[URL]")
+			glog.Fatalf("Failed to fetch external service. Missing --cloud-config=[config-file.yml]")
 		}
-		cloudProvider, err = external.BuildExternalCloudProvider(nodeGroupsFlag, b.cloudConfig)
+		config, err := os.Open(b.cloudConfig)
+		if err != nil {
+			glog.Fatalf("Couldn't open cloud provider configuration %s: %#v", b.cloudConfig, err)
+		}
+		cloudProvider, err = external.BuildExternalCloudProvider(nodeGroupsFlag, config)
 		if err != nil {
 			glog.Fatalf("Failed to create External cloud provider: %v", err)
 		}

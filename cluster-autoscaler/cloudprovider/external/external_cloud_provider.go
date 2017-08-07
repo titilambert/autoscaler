@@ -1,69 +1,74 @@
 package external
 
-// TODO: Add template for config file?
-// Example: --cloud-config=foo.cfg // or what ever, nothing is currently implemented.
-// [external]
-// add = http://127.0.0.1/api/v1/scaleUp/{size}
-// remove = http://127.0.0.1/api/v1/scaleDown/{name}
-// nodes = http://127.0.0.1/api/v1/nodes
+// Config file example: --cloud-config=cloud-config.yml -- Note that {*} will be replaced with the appropriate information.
+// ---
+// nodesURL: "http://127.0.0.1:8080/api/v1beta/autoscaler/nodes"
+// scaleUpURL: "http://127.0.0.1:8080/api/v1beta/autoscaler/scaleUp/{nodeGroupID}/{size}"
+// scaleDownURL: "http://127.0.0.1:8080/api/v1beta/autoscaler/scaleDown/{nodeID}"
+
 // TODO: Comments
-// TODO: Better struct name? And definitively better method names (i.e. not `eg *nodeGroup')
-// TODO: Better check for http response
-// TODO: Do not copy url
+// TODO: Better check for http response | INPROGRESS
 // TODO: Add support for cluster-autoscaler 0.6
+// TODO: Tests
 
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"net/http"
+	"strings"
 	"sync"
-
-	"github.com/golang/glog"
-
 	"time"
 
+	"github.com/golang/glog"
+	"gopkg.in/yaml.v2"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/config/dynamic"
 	apiv1 "k8s.io/kubernetes/pkg/api/v1"
 )
 
-type ExternalCloudProvider struct {
-	ExtGroup []*nodeGroup
-	url      string
+type CloudConfig struct {
+	nodeGroups        []*nodeGroup
+	NodesTemplate     string `yaml:"nodesTemplate"`
+	ScaleUpTemplate   string `yaml:"scaleUpTemplate"`
+	ScaleDownTemplate string `yaml:"scaleDownTemplate"`
 }
 
 type nodeGroup struct {
-	minSize int
-	maxSize int
-	id      string
-	nodes   []string
-	lock    sync.RWMutex
-	url     string
+	minSize     int
+	maxSize     int
+	id          string
+	nodes       []string
+	lock        sync.RWMutex
+	cloudConfig *CloudConfig
 }
 
-func (eg *nodeGroup) MinSize() int {
-	return eg.minSize
+func (n *nodeGroup) MinSize() int {
+	return n.minSize
 }
 
-func (eg *nodeGroup) MaxSize() int {
-	return eg.maxSize
+func (n *nodeGroup) MaxSize() int {
+	return n.maxSize
 }
 
 // How many VMs we are going to have
-func (eg *nodeGroup) TargetSize() (int, error) {
-	eg.lock.RLock()
-	defer eg.lock.RUnlock()
+func (n *nodeGroup) TargetSize() (int, error) {
+	n.lock.RLock()
+	defer n.lock.RUnlock()
 
-	return len(eg.nodes), nil
+	return len(n.nodes), nil
 }
 
 // How many "currently building" VMs needs to be removed
-func (eg *nodeGroup) DecreaseTargetSize(delta int) error {
+func (n *nodeGroup) DecreaseTargetSize(delta int) error {
 	return fmt.Errorf("external: DecreaseTargetSize not implemented")
 }
 
-func (eg *nodeGroup) IncreaseSize(delta int) error {
-	resp, err := http.Get(fmt.Sprintf("%s/addNodes?size=%d", eg.url, delta))
+func (n *nodeGroup) IncreaseSize(delta int) error {
+	scaleUpURL := strings.Replace(n.cloudConfig.ScaleUpTemplate, "{nodeGroupID}", n.id, 1)
+	scaleUpURL = strings.Replace(scaleUpURL, "{size}", string(delta), 1)
+	resp, err := http.Get(scaleUpURL)
 
 	if err != nil {
 		return err
@@ -74,12 +79,13 @@ func (eg *nodeGroup) IncreaseSize(delta int) error {
 	return nil
 }
 
-func (eg *nodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
+func (n *nodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 	msg := make(chan error, len(nodes))
 
 	for _, node := range nodes {
 		go func(node *apiv1.Node, msg chan error) {
-			_, err := http.Get(fmt.Sprintf("%s/removeNode?name=%v", eg.url, node.Spec.ProviderID))
+			scaleDownURL := strings.Replace(n.cloudConfig.ScaleDownTemplate, "{nodeID}", node.Spec.ProviderID, 1)
+			_, err := http.Get(scaleDownURL)
 			if err != nil {
 				msg <- err
 				return
@@ -98,40 +104,75 @@ func (eg *nodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 	return nil
 }
 
-func (eg *nodeGroup) Id() string {
-	return eg.id
+func (n *nodeGroup) Id() string {
+	return n.id
 }
 
-func (eg *nodeGroup) Debug() string {
-	return fmt.Sprintf("%s (%d:%d)", eg.id, eg.MinSize(), eg.MaxSize())
+func (n *nodeGroup) Debug() string {
+	return fmt.Sprintf("%s (%d:%d)", n.id, n.MinSize(), n.MaxSize())
 }
 
 // []string is a list of ProviderID, not machine id!
-func (eg *nodeGroup) Nodes() ([]string, error) {
-	eg.lock.RLock()
-	defer eg.lock.RUnlock()
+func (n *nodeGroup) Nodes() ([]string, error) {
+	n.lock.RLock()
+	defer n.lock.RUnlock()
 
-	return eg.nodes, nil
+	return n.nodes, nil
 }
 
-func (ext *ExternalCloudProvider) fetchCloudNodes() {
-	resp, err := http.Get(fmt.Sprintf("%s/nodeGroups", ext.url))
+// TODO: Is there a better way of doing this? (groups + nodeResponse)
+//{
+//	"status": "success",
+//	"groups": [{
+//		"nodes": ["node1", "node2"]
+//		"id": "foo"
+//	},
+//	{
+//		"nodes": [],
+//		"id": "bar"
+//	}]
+//}
+
+type groups struct {
+	Nodes []string
+	Id    string
+}
+
+type nodesResponse struct {
+	Status string
+	Groups []groups
+}
+
+func (c *CloudConfig) fetchCloudNodes() {
+	resp, err := http.Get(c.NodesTemplate)
 	if err != nil {
 		glog.Warningf("[external] failed to fetch nodes: %v", err)
 		return
 	}
 
-	var res map[string][]string
-	err = json.NewDecoder(resp.Body).Decode(&res)
+	var response nodesResponse
+	err = json.NewDecoder(resp.Body).Decode(&response)
 	if err != nil {
 		glog.Warningf("[external] failed to decode request: %v", err)
 		return
 	}
 
-	for _, group := range ext.ExtGroup {
-		group.lock.Lock()
-		group.nodes = res[group.id] // default to []string{} if not found
-		group.lock.Unlock()
+	if response.Status != "success" {
+		glog.Warningf("[external] list nodes request failed: %v", response.Status)
+	}
+
+	for _, group := range c.nodeGroups {
+		for _, apigroup := range response.Groups {
+			// TODO: doc - the api should always return all groups.
+			// TODO: what if not?
+			if group.id == apigroup.Id {
+				group.lock.Lock()
+				group.nodes = apigroup.Nodes
+				group.lock.Unlock()
+				break
+			}
+		}
+
 	}
 }
 
@@ -142,9 +183,26 @@ func loopForever(interval time.Duration, f func()) {
 	}
 }
 
-func BuildExternalCloudProvider(specs []string, url string) (*ExternalCloudProvider, error) {
-	ext := &ExternalCloudProvider{
-		url: url,
+func BuildExternalCloudProvider(specs []string, config io.Reader) (*CloudConfig, error) {
+	configBytes, err := ioutil.ReadAll(config)
+	if err != nil {
+		return nil, err
+	}
+
+	// The unmarshalling is the most WTF thing I've seen in Go.
+	// It only copy a value if:
+	//   - The field is exported
+	//   - The name of the field is all lower case except for the first character (Likethis).
+	// 1) This means that sometimes, you can write a string how ever you want (LiKeThIs), and sometimes,
+	// you must match an exact string (e.g. when using `yaml:"likeThis"`).
+	// It must be one of the most confusing thing when a user is seeing this.
+	// 2) Now, why only exported fields? It only adds a meaningless restriction. I fail to see any kind of benefits
+	// from enforcing such a policy.
+	// Maybe I'm missing something. Rant over.
+	var cloudConfig CloudConfig
+	err = yaml.Unmarshal(configBytes, &cloudConfig)
+	if err != nil {
+		return nil, err
 	}
 
 	for _, spec := range specs {
@@ -152,34 +210,34 @@ func BuildExternalCloudProvider(specs []string, url string) (*ExternalCloudProvi
 		if err != nil {
 			return nil, err
 		}
-		ext.ExtGroup = append(ext.ExtGroup, &nodeGroup{
-			minSize: groupSpec.MinSize,
-			maxSize: groupSpec.MaxSize,
-			id:      groupSpec.Name,
-			url:     url,
+		cloudConfig.nodeGroups = append(cloudConfig.nodeGroups, &nodeGroup{
+			minSize:     groupSpec.MinSize,
+			maxSize:     groupSpec.MaxSize,
+			id:          groupSpec.Name,
+			cloudConfig: &cloudConfig,
 		})
 	}
 
-	go loopForever(10*time.Second, ext.fetchCloudNodes)
+	go loopForever(10*time.Second, cloudConfig.fetchCloudNodes)
 
-	return ext, nil
+	return &cloudConfig, nil
 }
 
-func (ext *ExternalCloudProvider) Name() string {
+func (c *CloudConfig) Name() string {
 	return "external"
 }
 
-func (ext *ExternalCloudProvider) NodeGroups() []cloudprovider.NodeGroup {
-	result := make([]cloudprovider.NodeGroup, 0, len(ext.ExtGroup))
-	for _, nodeGroup := range ext.ExtGroup {
+func (c *CloudConfig) NodeGroups() []cloudprovider.NodeGroup {
+	result := make([]cloudprovider.NodeGroup, 0, len(c.nodeGroups))
+	for _, nodeGroup := range c.nodeGroups {
 		result = append(result, nodeGroup)
 	}
 
 	return result
 }
 
-func (ext *ExternalCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovider.NodeGroup, error) {
-	for _, nodeGroup := range ext.ExtGroup {
+func (c *CloudConfig) NodeGroupForNode(node *apiv1.Node) (cloudprovider.NodeGroup, error) {
+	for _, nodeGroup := range c.nodeGroups {
 		nodeGroup.lock.RLock()
 		for _, name := range nodeGroup.nodes {
 			if name == node.Spec.ProviderID {
@@ -192,10 +250,10 @@ func (ext *ExternalCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovi
 	return nil, nil
 }
 
-// func (eg *nodeGroup) TemplateNodeInfo() (*schedulercache.NodeInfo, error) {
+// func (n *nodeGroup) TemplateNodeInfo() (*schedulercache.NodeInfo, error) {
 // 	return nil, cloudprovider.ErrNotImplemented
 // }
 
-// func (ext *ExternalCloudProvider) Pricing() (cloudprovider.PricingModel, errors.AutoscalerError) {
+// func (c *CloudConfig) Pricing() (cloudprovider.PricingModel, errors.AutoscalerError) {
 // 	return nil, cloudprovider.ErrNotImplemented
 // }
