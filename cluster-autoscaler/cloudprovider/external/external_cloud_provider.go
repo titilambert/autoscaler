@@ -17,6 +17,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -67,7 +68,7 @@ func (n *nodeGroup) DecreaseTargetSize(delta int) error {
 
 func (n *nodeGroup) IncreaseSize(delta int) error {
 	scaleUpURL := strings.Replace(n.cloudConfig.ScaleUpTemplate, "{nodeGroupID}", n.id, 1)
-	scaleUpURL = strings.Replace(scaleUpURL, "{size}", string(delta), 1)
+	scaleUpURL = strings.Replace(scaleUpURL, "{size}", strconv.Itoa(delta), 1)
 	resp, err := http.Get(scaleUpURL)
 
 	if err != nil {
@@ -120,27 +121,24 @@ func (n *nodeGroup) Nodes() ([]string, error) {
 	return n.nodes, nil
 }
 
-// TODO: Is there a better way of doing this? (groups + nodeResponse)
-//{
+// TODO: Missing code + reason in case of status != success.
+// {
 //	"status": "success",
 //	"groups": [{
 //		"nodes": ["node1", "node2"]
 //		"id": "foo"
-//	},
-//	{
+//	  },
+//	  {
 //		"nodes": [],
 //		"id": "bar"
-//	}]
-//}
-
-type groups struct {
-	Nodes []string
-	Id    string
-}
-
+//	  }]
+// }
 type nodesResponse struct {
 	Status string
-	Groups []groups
+	Groups []struct {
+		Nodes []string
+		Id    string
+	}
 }
 
 func (c *CloudConfig) fetchCloudNodes() {
@@ -172,7 +170,6 @@ func (c *CloudConfig) fetchCloudNodes() {
 				break
 			}
 		}
-
 	}
 }
 
