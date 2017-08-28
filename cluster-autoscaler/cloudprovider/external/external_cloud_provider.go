@@ -4,11 +4,10 @@ package external
 // ---
 // nodesURL: "http://127.0.0.1:8080/api/v1beta/autoscaler/nodes"
 // scaleUpURL: "http://127.0.0.1:8080/api/v1beta/autoscaler/scaleUp/{nodeGroupID}/{size}"
-// scaleDownURL: "http://127.0.0.1:8080/api/v1beta/autoscaler/scaleDown/{nodeID}"
+// scaleDownURL: "http://127.0.0.1:8080/api/v1beta/autoscaler/scaleDown/{nodeGroupID}/{nodeID}"
 
 // TODO: Comments
 // TODO: Better check for http response | INPROGRESS
-// TODO: Add support for cluster-autoscaler 0.6
 // TODO: Tests
 
 import (
@@ -26,7 +25,9 @@ import (
 	"gopkg.in/yaml.v2"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/config/dynamic"
+	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
 	apiv1 "k8s.io/kubernetes/pkg/api/v1"
+	"k8s.io/kubernetes/plugin/pkg/scheduler/schedulercache"
 )
 
 type CloudConfig struct {
@@ -85,7 +86,10 @@ func (n *nodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 
 	for _, node := range nodes {
 		go func(node *apiv1.Node, msg chan error) {
-			scaleDownURL := strings.Replace(n.cloudConfig.ScaleDownTemplate, "{nodeID}", node.Spec.ProviderID, 1)
+			scaleDownURL := strings.Replace(n.cloudConfig.ScaleDownTemplate, "{nodeGroupID}", n.id, 1)
+			// TODO: send node.Spec.ProviderID instead of node.Name (need to move to a POST though)
+			scaleDownURL = strings.Replace(scaleDownURL, "{nodeID}", node.Name, 1)
+
 			_, err := http.Get(scaleDownURL)
 			if err != nil {
 				msg <- err
@@ -203,7 +207,7 @@ func BuildExternalCloudProvider(specs []string, config io.Reader) (*CloudConfig,
 	}
 
 	for _, spec := range specs {
-		groupSpec, err := dynamic.SpecFromString(spec)
+		groupSpec, err := dynamic.SpecFromString(spec, false)
 		if err != nil {
 			return nil, err
 		}
@@ -247,10 +251,10 @@ func (c *CloudConfig) NodeGroupForNode(node *apiv1.Node) (cloudprovider.NodeGrou
 	return nil, nil
 }
 
-// func (n *nodeGroup) TemplateNodeInfo() (*schedulercache.NodeInfo, error) {
-// 	return nil, cloudprovider.ErrNotImplemented
-// }
+func (n *nodeGroup) TemplateNodeInfo() (*schedulercache.NodeInfo, error) {
+	return nil, cloudprovider.ErrNotImplemented
+}
 
-// func (c *CloudConfig) Pricing() (cloudprovider.PricingModel, errors.AutoscalerError) {
-// 	return nil, cloudprovider.ErrNotImplemented
-// }
+func (c *CloudConfig) Pricing() (cloudprovider.PricingModel, errors.AutoscalerError) {
+	return nil, cloudprovider.ErrNotImplemented
+}
